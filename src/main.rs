@@ -1,0 +1,987 @@
+
+use axum::{                                                                                                                                                                      
+    extract::{self, Path, Query},  
+    routing::{get, post},                                                                                                                                                        
+    Json, Router,                        
+};       
+use minio_rsc::{Minio, provider::StaticProvider, client::PresignedArgs};
+use serde::{Deserialize, Serialize};                                                                                                                                                          
+use serde_json::{json, Value};                                                                                                                                                  
+use sqlx::PgPool;                                                                                                                                                               
+use sqlx::{postgres::PgPoolOptions, prelude::FromRow};                                                                                                                           
+use std::env;                                                                                                                                                                    
+use std::net::SocketAddr;                                                                                                                                                        
+use std::result::Result;                                                                                                                                                         
+use std::sync::Arc;                                                                                                                                                              
+use axum::http::StatusCode;                  
+use sqlx::types::chrono::Utc; 
+use std::collections::HashMap;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use axum::http::Method;
+use reqwest;
+
+
+use axum::response::{Html, IntoResponse};
+use tower::service_fn;
+use tower_http::services::ServeDir;
+
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+struct Users {
+    user_id: Option<uuid::Uuid>,
+    email: String,
+    name: String,
+    password_hash: String,
+}
+
+pub async fn add_users(
+    extract::State(pool): extract::State<PgPool>,
+    Json(payload): Json<Users>,
+) -> Json<Value> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_add_users(extract::State(pool), Json(payload)).await;
+    result
+}
+
+pub async fn data_add_users(
+    extract::State(pool): extract::State<PgPool>,
+    Json(payload): Json<Users>,
+) -> Json<Value> {
+    let query = "INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING *";
+    
+    let q = sqlx::query_as::<_, Users>(&query)
+		.bind(payload.email)
+		.bind(payload.name)
+		.bind(payload.password_hash);
+    
+    let result = q.fetch_one(&pool).await;
+
+    match result {
+        Ok(value) => Json(json!({"res": "success", "data": value})),
+        Err(e) => Json(json!({"res": format!("error: {}", e)}))
+    }
+}
+
+
+#[derive(Deserialize)]
+struct usersQueryParams {
+    order_by: Option<String>,
+    direction: Option<String>, // "asc" or "desc"
+    #[serde(flatten)]
+    filters: HashMap<String, String>,
+}
+
+
+pub async fn get_users(
+    extract::State(pool): extract::State<PgPool>,
+    Query(query_params): Query<usersQueryParams>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_users(extract::State(pool), axum::extract::Query(query_params)).await;
+    result
+}
+
+
+
+pub async fn data_get_users(
+    extract::State(pool): extract::State<PgPool>,
+    query_params: axum::extract::Query<usersQueryParams>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut query = "SELECT * FROM users".to_owned();
+    let mut sql_params: Vec<String> = Vec::new();
+    let mut param_index = 1;
+    
+    // Handle filters
+    if !query_params.filters.is_empty() {
+        let mut where_conditions: Vec<String> = Vec::new();
+        
+        for (field, value) in &query_params.filters {
+            // Skip ordering parameters
+            if field == "order_by" || field == "direction" {
+                continue;
+            }
+            
+            // Validate field name to prevent SQL injection
+            if field.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                where_conditions.push(format!("{} = ${}", field, param_index));
+                sql_params.push(value.clone());
+                param_index += 1;
+            } else {
+                return Err((StatusCode::BAD_REQUEST, format!("Invalid field name: {}", field)));
+            }
+        }
+        
+        if !where_conditions.is_empty() {
+            query.push_str(&(" WHERE ".to_owned() + &where_conditions.join(" AND ")));
+        }
+    }
+    
+    // Validate and apply ordering if provided
+    if let Some(order_by) = &query_params.order_by {
+        // Validate order_by column name to prevent SQL injection
+        // Only allow alphanumeric characters and underscores
+        if order_by.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            // Validate direction parameter
+            let direction = match &query_params.direction {
+                Some(dir) if dir.to_lowercase() == "desc" => "DESC",
+                _ => "ASC",
+            };
+            
+            query.push_str(&format!(" ORDER BY {} {}", *order_by, direction));
+        } else {
+            return Err((StatusCode::BAD_REQUEST, "Invalid order_by parameter".to_string()));
+        }
+    }
+
+    // Execute query with parameters
+    let mut query_builder = sqlx::query_as::<_, Users>(&query);
+    for param in &sql_params {
+        query_builder = query_builder.bind(param);
+    }
+
+    let elemints: Vec<Users> = query_builder.fetch_all(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e))
+    })?;
+
+    let res_json: Vec<Value> = elemints.into_iter().map(|elemint| {
+        json!({
+    	"user_id": elemint.user_id, 
+	"email": elemint.email, 
+	"name": elemint.name, 
+	"password_hash": elemint.password_hash
+        })
+    }).collect();
+
+    Ok(Json(json!({ "payload": res_json })))
+}
+
+#[derive(Debug, Deserialize)]
+struct usersuser_idQuery {
+    user_id: uuid::Uuid,
+}
+
+pub async fn get_one_usersuser_id(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<usersuser_idQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_usersuser_id(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_usersuser_id(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<usersuser_idQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM users WHERE user_id = $1");
+    let q = sqlx::query_as::<_, Users>(&query).bind(match_val.user_id.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"user_id": elemint.user_id, 
+	"email": elemint.email, 
+	"name": elemint.name, 
+	"password_hash": elemint.password_hash, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with user_id = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct usersemailQuery {
+    email: String,
+}
+
+pub async fn get_one_usersemail(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<usersemailQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_usersemail(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_usersemail(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<usersemailQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM users WHERE email = $1");
+    let q = sqlx::query_as::<_, Users>(&query).bind(match_val.email.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"user_id": elemint.user_id, 
+	"email": elemint.email, 
+	"name": elemint.name, 
+	"password_hash": elemint.password_hash, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with email = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct usersnameQuery {
+    name: String,
+}
+
+pub async fn get_one_usersname(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<usersnameQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_usersname(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_usersname(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<usersnameQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM users WHERE name = $1");
+    let q = sqlx::query_as::<_, Users>(&query).bind(match_val.name.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"user_id": elemint.user_id, 
+	"email": elemint.email, 
+	"name": elemint.name, 
+	"password_hash": elemint.password_hash, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with name = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct userspassword_hashQuery {
+    password_hash: String,
+}
+
+pub async fn get_one_userspassword_hash(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<userspassword_hashQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_userspassword_hash(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_userspassword_hash(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<userspassword_hashQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM users WHERE password_hash = $1");
+    let q = sqlx::query_as::<_, Users>(&query).bind(match_val.password_hash.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"user_id": elemint.user_id, 
+	"email": elemint.email, 
+	"name": elemint.name, 
+	"password_hash": elemint.password_hash, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with password_hash = the value"))),
+    }
+}
+
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+struct Notes {
+    note_id: Option<uuid::Uuid>,
+    user_id: uuid::Uuid,
+    title: String,
+    text: String,
+    created_at: chrono::DateTime<Utc>,
+    label: String,
+    vector_representation: Vec<u8>,
+}
+
+pub async fn add_notes(
+    extract::State(pool): extract::State<PgPool>,
+    Json(payload): Json<Notes>,
+) -> Json<Value> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_add_notes(extract::State(pool), Json(payload)).await;
+    result
+}
+
+async fn get_vector_from_text(text: &str) -> Result<Vec<f64>, reqwest::Error> {
+    let client = reqwest::Client::new();
+    let request_body = serde_json::json!({
+        "msg": text
+    });
+
+    let response = client
+        .post("http://python:8083/vecter")
+        .json(&request_body)
+        .send()
+        .await?;
+
+    let response_json: serde_json::Value = response.json().await?;
+    
+    match response_json["vector"].as_array() {
+        Some(vector_array) => {
+            let vector: Vec<f64> = vector_array
+                .iter()
+                .filter_map(|v| v.as_f64())
+                .collect();
+            Ok(vector)
+        }
+        None => Err(reqwest::Error::from(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid vector response format"
+        )))
+    }
+}
+
+pub async fn data_add_notes(
+    extract::State(pool): extract::State<PgPool>,
+    Json(payload): Json<Notes>,
+) -> Json<Value> {
+    // Call Python API to get vector representation
+    let vector = match get_vector_from_text(&payload.text).await {
+        Ok(v) => {
+            println!("Generated vector for text '{}': {} dimensions", payload.text, v.len());
+            v
+        },
+        Err(e) => return Json(json!({"res": format!("error getting vector: {}", e)}))
+    };
+
+    let query = "INSERT INTO notes (user_id, title, text, created_at, label, vector_representation) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *";
+    
+    let q = sqlx::query_as::<_, Notes>(&query)
+		.bind(payload.user_id)
+		.bind(payload.title)
+		.bind(payload.text)
+		.bind(payload.created_at)
+		.bind(payload.label)
+		.bind(&vector);
+    
+    let result = q.fetch_one(&pool).await;
+
+    match result {
+        Ok(value) => Json(json!({"res": "success", "data": value})),
+        Err(e) => Json(json!({"res": format!("error: {}", e)}))
+    }
+}
+
+
+#[derive(Deserialize)]
+struct notesQueryParams {
+    order_by: Option<String>,
+    direction: Option<String>, // "asc" or "desc"
+    #[serde(flatten)]
+    filters: HashMap<String, String>,
+}
+
+
+pub async fn get_notes(
+    extract::State(pool): extract::State<PgPool>,
+    Query(query_params): Query<notesQueryParams>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_notes(extract::State(pool), axum::extract::Query(query_params)).await;
+    result
+}
+
+
+
+pub async fn data_get_notes(
+    extract::State(pool): extract::State<PgPool>,
+    query_params: axum::extract::Query<notesQueryParams>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let mut query = "SELECT * FROM notes".to_owned();
+    let mut sql_params: Vec<String> = Vec::new();
+    let mut param_index = 1;
+    
+    // Handle filters
+    if !query_params.filters.is_empty() {
+        let mut where_conditions: Vec<String> = Vec::new();
+        
+        for (field, value) in &query_params.filters {
+            // Skip ordering parameters
+            if field == "order_by" || field == "direction" {
+                continue;
+            }
+            
+            // Validate field name to prevent SQL injection
+            if field.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                where_conditions.push(format!("{} = ${}", field, param_index));
+                sql_params.push(value.clone());
+                param_index += 1;
+            } else {
+                return Err((StatusCode::BAD_REQUEST, format!("Invalid field name: {}", field)));
+            }
+        }
+        
+        if !where_conditions.is_empty() {
+            query.push_str(&(" WHERE ".to_owned() + &where_conditions.join(" AND ")));
+        }
+    }
+    
+    // Validate and apply ordering if provided
+    if let Some(order_by) = &query_params.order_by {
+        // Validate order_by column name to prevent SQL injection
+        // Only allow alphanumeric characters and underscores
+        if order_by.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            // Validate direction parameter
+            let direction = match &query_params.direction {
+                Some(dir) if dir.to_lowercase() == "desc" => "DESC",
+                _ => "ASC",
+            };
+            
+            query.push_str(&format!(" ORDER BY {} {}", *order_by, direction));
+        } else {
+            return Err((StatusCode::BAD_REQUEST, "Invalid order_by parameter".to_string()));
+        }
+    }
+
+    // Execute query with parameters
+    let mut query_builder = sqlx::query_as::<_, Notes>(&query);
+    for param in &sql_params {
+        query_builder = query_builder.bind(param);
+    }
+
+    let elemints: Vec<Notes> = query_builder.fetch_all(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e))
+    })?;
+
+    let res_json: Vec<Value> = elemints.into_iter().map(|elemint| {
+        json!({
+    	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation
+        })
+    }).collect();
+
+    Ok(Json(json!({ "payload": res_json })))
+}
+
+#[derive(Debug, Deserialize)]
+struct notesnote_idQuery {
+    note_id: uuid::Uuid,
+}
+
+pub async fn get_one_notesnote_id(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notesnote_idQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_notesnote_id(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_notesnote_id(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notesnote_idQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM notes WHERE note_id = $1");
+    let q = sqlx::query_as::<_, Notes>(&query).bind(match_val.note_id.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with note_id = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct notesuser_idQuery {
+    user_id: uuid::Uuid,
+}
+
+pub async fn get_one_notesuser_id(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notesuser_idQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_notesuser_id(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_notesuser_id(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notesuser_idQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM notes WHERE user_id = $1");
+    let q = sqlx::query_as::<_, Notes>(&query).bind(match_val.user_id.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with user_id = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct notestitleQuery {
+    title: String,
+}
+
+pub async fn get_one_notestitle(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notestitleQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_notestitle(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_notestitle(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notestitleQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM notes WHERE title = $1");
+    let q = sqlx::query_as::<_, Notes>(&query).bind(match_val.title.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with title = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct notestextQuery {
+    text: String,
+}
+
+pub async fn get_one_notestext(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notestextQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_notestext(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_notestext(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notestextQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM notes WHERE text = $1");
+    let q = sqlx::query_as::<_, Notes>(&query).bind(match_val.text.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with text = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct notescreated_atQuery {
+    created_at: chrono::DateTime<Utc>,
+}
+
+pub async fn get_one_notescreated_at(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notescreated_atQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_notescreated_at(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_notescreated_at(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notescreated_atQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM notes WHERE created_at = $1");
+    let q = sqlx::query_as::<_, Notes>(&query).bind(match_val.created_at.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with created_at = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct noteslabelQuery {
+    label: String,
+}
+
+pub async fn get_one_noteslabel(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<noteslabelQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_noteslabel(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_noteslabel(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<noteslabelQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM notes WHERE label = $1");
+    let q = sqlx::query_as::<_, Notes>(&query).bind(match_val.label.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with label = the value"))),
+    }
+}
+
+
+
+#[derive(Debug, Deserialize)]
+struct notesvector_representationQuery {
+    vector_representation: Vec<u8>,
+}
+
+pub async fn get_one_notesvector_representation(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notesvector_representationQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    // Call data function from data module 
+    // Other business logic can also be handled here 
+    let result = data_get_one_notesvector_representation(extract::State(pool), match_val).await;
+    result
+}
+
+pub async fn data_get_one_notesvector_representation(
+    extract::State(pool): extract::State<PgPool>,
+    match_val: Query<notesvector_representationQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let query = format!("SELECT * FROM notes WHERE vector_representation = $1");
+    let q = sqlx::query_as::<_, Notes>(&query).bind(match_val.vector_representation.clone());
+
+    let elemint = q.fetch_optional(&pool).await.map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database err{}", e))
+    })?;
+
+    match elemint {
+        Some(elemint) => Ok(Json(json!({
+            "payload": {
+                	"note_id": elemint.note_id, 
+	"user_id": elemint.user_id, 
+	"title": elemint.title, 
+	"text": elemint.text, 
+	"created_at": elemint.created_at, 
+	"label": elemint.label, 
+	"vector_representation": elemint.vector_representation, 
+
+            }
+        }))),
+        None => Err((StatusCode::NOT_FOUND, format!("No record found with vector_representation = the value"))),
+    }
+}
+
+
+
+
+async fn python() -> Result<Json<Value>, (StatusCode, String)> {
+    // Call the Python FastAPI service
+    let client = reqwest::Client::new();
+    let res = client
+        .get("http://python:8003/chat")  // Use service name and correct port
+        .send()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Request failed: {}", e)))?;
+
+    if res.status().is_client_error() || res.status().is_server_error() {
+        return Err((StatusCode::BAD_REQUEST, format!("Error from Python service: {}", res.status())));
+    }
+
+    let json_response: Value = res
+        .json()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to parse JSON: {}", e)))?;
+
+    Ok(Json(json!({"payload": json_response})))
+}
+
+
+async fn health() -> String {"healthy".to_string() }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db_url = env::var("DATABASE_URL")
+     .unwrap_or_else(|_| "postgres://dbuser:p@localhost:1111/data".to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(100)
+        .connect(&db_url)
+        .await?;
+
+    let migrate = sqlx::migrate!("./migrations").run(&pool).await;
+
+    match migrate {
+        Ok(_) => println!("Migrations applied successfully."),
+        Err(e) => eprintln!("Error applying migrations: {}", e),
+    };
+
+    let static_service =
+        ServeDir::new("frontend/build").not_found_service(service_fn(|_req| async {
+            match tokio::fs::read_to_string("frontend/build/index.html").await {
+                Ok(body) => Ok((StatusCode::OK, Html(body)).into_response()),
+                Err(err) => Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to read index.html: {}", err),
+                )
+                    .into_response()),
+            }
+        }));
+
+
+    let app = Router::new()
+    .route("/health", get(health))
+    	.route("/add_users", post(add_users))
+	.route("/get_users", get(get_users))
+	.route("/get_one_usersuser_id", get(get_one_usersuser_id))
+	.route("/get_one_usersemail", get(get_one_usersemail))
+	.route("/get_one_usersname", get(get_one_usersname))
+	.route("/get_one_userspassword_hash", get(get_one_userspassword_hash))
+	.route("/add_notes", post(add_notes))
+	.route("/get_notes", get(get_notes))
+	.route("/get_one_notesnote_id", get(get_one_notesnote_id))
+	.route("/get_one_notesuser_id", get(get_one_notesuser_id))
+	.route("/get_one_notestitle", get(get_one_notestitle))
+	.route("/get_one_notestext", get(get_one_notestext))
+	.route("/get_one_notescreated_at", get(get_one_notescreated_at))
+	.route("/get_one_noteslabel", get(get_one_noteslabel))
+	.route("/get_one_notesvector_representation", get(get_one_notesvector_representation))
+	.route("/signed-urls/:video_path", get(get_signed_url))
+
+    .route("/python", get(python))
+    .fallback_service(static_service)
+    .layer(
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(vec![
+                "http://localhost:3000".parse().unwrap(),
+                "https://example.com".parse().unwrap(),
+            ]))
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers(tower_http::cors::Any)
+    )
+        .with_state(pool);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8081").await.unwrap();
+
+    axum::serve(listener, app).await.unwrap();
+    Ok(())
+}
+
+
+
+async fn generate_signed_url(object_key: String) -> Result<String, anyhow::Error> {
+    let endpoint = env::var("MINIO_ENDPOINT")
+        .unwrap_or_else(|_| "localhost:9001".to_string());
+    let access_key = env::var("MINIO_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string());
+    let secret_key = env::var("MINIO_SECRET_KEY").unwrap_or_else(|_| "minioadmin".to_string());
+    let bucket = env::var("MINIO_BUCKET").unwrap_or_else(|_| "bucket".to_string());
+    let endpoint = env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "localhost:9000".to_string());
+    let secure = env::var("MINIO_SECURE")
+        .map(|s| s.to_lowercase() == "true")
+        .unwrap_or(false);
+
+    let provider = StaticProvider::new(&access_key, &secret_key, None);
+
+    let minio = Minio::builder()
+        .endpoint(&endpoint)
+        .provider(provider)
+        .secure(secure)
+        .region("us-east-1".to_string())  // Explicitly set region to match MinIO default
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create MinIO client: {}", e))?;
+
+    let presigned_url = minio
+        .presigned_get_object(
+            PresignedArgs::new(bucket, object_key)
+                .expires(3600),  // 1 hour in seconds
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to generate presigned URL: {}", e))?;
+    Ok(presigned_url)
+}
+    
+
+async fn get_signed_url(
+    Path(video_path): Path<String>,
+) -> impl IntoResponse {
+    let object_key = video_path; 
+    println!("Environment variables:");
+    println!("MINIO_ENDPOINT: {}", env::var("MINIO_ENDPOINT").unwrap_or_else(|_| "not set".to_string()));
+    println!("MINIO_BUCKET: {}", env::var("MINIO_BUCKET").unwrap_or_else(|_| "not set, using default 'test'".to_string()));
+    
+    match generate_signed_url(object_key).await {
+        Ok(url) => (StatusCode::OK, url).into_response(),
+        Err(e) => {
+            eprintln!("Error generating signed URL: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to generate signed URL: {}", e)).into_response()
+        }
+    }
+}
+async fn upload_video(
+    // mut multipart: Multipart,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let provider = StaticProvider::new("minioadmin", "minioadmin", None);
+    let minio = Minio::builder()
+        .endpoint("minio:9000")
+        .provider(provider)
+        .secure(false)
+        .build()
+        .unwrap();
+
+        let _data = "hello minio";
+
+        let upload_result = minio.put_object("bucket", "file.txt", _data.into()).await;
+        
+        return Ok(Json(json!({
+            "status": upload_result.is_ok(),
+            "message": if upload_result.is_ok() {
+                "File uploaded successfully"
+            } else {
+                "Failed to upload file"
+            },
+            "file_name": "file.txt"
+        })));
+}
+    
