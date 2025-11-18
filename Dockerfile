@@ -54,12 +54,12 @@ RUN useradd -m -u 10001 appuser
 WORKDIR /app
 
 # Copy compiled binary & any runtime assets (e.g. migrations)
-COPY --from=builder /app/target/release/notes-app2 ./
+COPY --from=builder /app/target/release/notes-app ./
 COPY --from=builder /app/migrations ./migrations
 COPY --from=frontend-builder /app/frontend/build ./frontend/build
 
 # Ensure the binary is executable
-RUN chown -R appuser:appuser /app && chmod +x /app/notes-app2
+RUN chown -R appuser:appuser /app && chmod +x /app/notes-app
 
 USER appuser
 
@@ -67,5 +67,5 @@ USER appuser
 EXPOSE 8081
 
 # Start the server
-CMD ["/app/notes-app2"]
+CMD ["/app/notes-app"]
 

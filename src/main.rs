@@ -12,7 +12,9 @@ use sqlx::{postgres::PgPoolOptions, prelude::FromRow};
 use std::env;                                                                                                                                                                    
 use std::net::SocketAddr;                                                                                                                                                        
 use std::result::Result;                                                                                                                                                         
-use std::sync::Arc;                                                                                                                                                              
+use std::sync::Arc;
+use std::fs::OpenOptions;
+use std::io::Write;                                                                                                                                                              
 use axum::http::StatusCode;                  
 use sqlx::types::chrono::Utc; 
 use std::collections::HashMap;
@@ -345,33 +347,42 @@ pub async fn add_notes(
     result
 }
 
-async fn get_vector_from_text(text: &str) -> Result<Vec<f64>, reqwest::Error> {
+async fn get_vector_from_text(text: &str) -> Vec<f64> { //  -> Result<Vec<f64>, Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
     let request_body = serde_json::json!({
         "msg": text
     });
 
     let response = client
-        .post("http://python:8083/vecter")
+        .post("http://python:8003/vecter")
         .json(&request_body)
         .send()
-        .await?;
+        .await.expect("bad stuff");
 
-    let response_json: serde_json::Value = response.json().await?;
-    
-    match response_json["vector"].as_array() {
-        Some(vector_array) => {
-            let vector: Vec<f64> = vector_array
-                .iter()
-                .filter_map(|v| v.as_f64())
-                .collect();
-            Ok(vector)
-        }
-        None => Err(reqwest::Error::from(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Invalid vector response format"
-        )))
+
+    let body = response.text().await;
+    if let Err(e) = std::fs::write("test_output.log", format!("json is: {:?}", body)) {
+        eprintln!("Failed to write test file: {}", e);
     }
+
+
+    // let response_json: serde_json::Value = response.json().await.expect("bad stuff happend");
+
+    // let vector_reponse = &response_json["vector"];
+
+
+
+    // let vector = vector_reponse.ok_or_else().map(|v| v.as_f64()).collect();
+    //
+    // let vector: Vec<f64> = response_json["vector"]
+    //     .as_array()
+    //     .ok_or_else(|| Error)?
+    //     .iter()
+    //     .filter_map(|v| v.as_f64())
+    //     .collect();
+    //
+//    Ok(vector)
+    vec![1.2, 1.2 ,1.2]
 }
 
 pub async fn data_add_notes(
@@ -379,14 +390,14 @@ pub async fn data_add_notes(
     Json(payload): Json<Notes>,
 ) -> Json<Value> {
     // Call Python API to get vector representation
-    let vector = match get_vector_from_text(&payload.text).await {
-        Ok(v) => {
-            println!("Generated vector for text '{}': {} dimensions", payload.text, v.len());
-            v
-        },
-        Err(e) => return Json(json!({"res": format!("error getting vector: {}", e)}))
-    };
-
+    // let vector = match get_vector_from_text(&payload.text).await {
+    //     Ok(v) => {
+    //         println!("Generated vector for text '{}': {} dimensions", payload.text, v.len());
+    //         v
+    //     },
+    //     Err(e) => return Json(json!({"res": format!("error getting vector: {}", e)}))
+    // };
+    //
     let query = "INSERT INTO notes (user_id, title, text, created_at, label, vector_representation) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *";
     
     let q = sqlx::query_as::<_, Notes>(&query)
@@ -394,8 +405,8 @@ pub async fn data_add_notes(
 		.bind(payload.title)
 		.bind(payload.text)
 		.bind(payload.created_at)
-		.bind(payload.label)
-		.bind(&vector);
+		.bind(payload.label);
+		// .bind(&vector);
     
     let result = q.fetch_one(&pool).await;
 
@@ -844,6 +855,8 @@ async fn health() -> String {"healthy".to_string() }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+   
+    let _res = get_vector_from_text("i am hungry").await;
     let db_url = env::var("DATABASE_URL")
      .unwrap_or_else(|_| "postgres://dbuser:p@localhost:1111/data".to_string());
     let pool = PgPoolOptions::new()
@@ -889,6 +902,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	.route("/get_one_noteslabel", get(get_one_noteslabel))
 	.route("/get_one_notesvector_representation", get(get_one_notesvector_representation))
 	.route("/signed-urls/:video_path", get(get_signed_url))
+
 
     .route("/python", get(python))
     .fallback_service(static_service)

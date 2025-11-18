@@ -76,6 +76,8 @@ services:
       context: ./fastapi-template
     depends_on:
       - app
+    env_file:
+      - .env
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://localhost:8003/health"]
       interval: 10s
